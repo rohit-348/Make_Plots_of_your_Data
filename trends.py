@@ -315,10 +315,14 @@ def read_table(file_bytes: bytes, filename: str, sheet: str | None) -> pd.DataFr
     if filename.lower().endswith((".xlsx", ".xlsm")):
         df = pd.read_excel(bio, sheet_name=sheet if sheet is not None else 0)
     else:
+        # Fast C-engine first (critical for large 50MB+ CSVs), fallback to python sniffer
         try:
-            df = pd.read_csv(bio, sep=None, engine="python")
-        except UnicodeDecodeError:
-            df = pd.read_csv(io.BytesIO(file_bytes), sep=None, engine="python", encoding="latin-1")
+            df = pd.read_csv(bio, low_memory=False)
+        except Exception:
+            try:
+                df = pd.read_csv(io.BytesIO(file_bytes), sep=None, engine="python")
+            except UnicodeDecodeError:
+                df = pd.read_csv(io.BytesIO(file_bytes), low_memory=False, encoding="latin-1")
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
@@ -693,7 +697,6 @@ def build_multi_figure(
             hoverformat="%d %b %Y, %H:%M",
             tickfont=dict(color="#5A5D6E", size=11),
             automargin=True,
-            # On-Graph Timeframe Selector Buttons (1D, 1W, 1M, 3M, 6M, 1Y, ALL)
             rangeselector=dict(
                 bgcolor="#F4F5F7",
                 activecolor="#5367FF",
@@ -714,7 +717,6 @@ def build_multi_figure(
                     dict(step="all", label="ALL"),
                 ],
             ),
-            # Interactive On-Graph X-Axis Timeline Scrubber / Range Slider
             rangeslider=dict(
                 visible=True,
                 thickness=0.08,
@@ -754,16 +756,23 @@ def range_bar(low: float, high: float, cur: float, color: str) -> str:
 
 
 def _handle_upload(up_file) -> None:
-    if up_file is not None:
-        st.session_state["uploaded_bytes"] = up_file.getvalue()
-        st.session_state["uploaded_name"] = up_file.name
-        if up_file.name.lower().endswith((".xlsx", ".xlsm")):
-            sheets = list_sheets(up_file.getvalue())
-            st.session_state["active_sheet"] = sheets[0]
-        else:
-            st.session_state["active_sheet"] = None
-        st.session_state["selected_tags"] = []
-        st.rerun()
+    if up_file is None:
+        return
+    file_sig = (up_file.name, up_file.size)
+    if st.session_state.get("last_uploaded_sig") == file_sig:
+        return
+    st.session_state["last_uploaded_sig"] = file_sig
+    st.session_state["uploaded_bytes"] = up_file.getvalue()
+    st.session_state["uploaded_name"] = up_file.name
+    if up_file.name.lower().endswith((".xlsx", ".xlsm")):
+        sheets = list_sheets(up_file.getvalue())
+        st.session_state["active_sheet"] = sheets[0]
+    else:
+        st.session_state["active_sheet"] = None
+    # Safely clear widget state BEFORE next rerun instantiates the multiselect
+    st.session_state.pop("selected_tags", None)
+    st.session_state.pop("inspect_tag", None)
+    st.rerun()
 
 
 # --------------------------------------------------------------------------- #
@@ -801,11 +810,17 @@ def main() -> None:
 
     tags = list(df.columns) if not df.empty else []
 
-    # Maintain multi-select tag list in session_state
-    prev_selected = [t for t in st.session_state.get("selected_tags", []) if t in tags]
-    if not prev_selected and tags:
-        prev_selected = [tags[0]]
-    st.session_state["selected_tags"] = prev_selected
+    # Sanitize multi-select tag list in session_state BEFORE creating the widget
+    if "selected_tags" in st.session_state:
+        valid_sel = [t for t in st.session_state["selected_tags"] if t in tags]
+        if valid_sel:
+            st.session_state["selected_tags"] = valid_sel
+        elif tags:
+            st.session_state["selected_tags"] = [tags[0]]
+        else:
+            st.session_state["selected_tags"] = []
+    elif tags:
+        st.session_state["selected_tags"] = [tags[0]]
 
     # ---- Top Bar: Brand + Author | Live Multi-Select | Upload | Parameters -- #
     c_brand, c_search_drop, c_up, c_menu = st.columns([1.25, 4.15, 0.95, 1.05], vertical_alignment="center")
