@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 st.set_page_config(
     page_title="PlantWatch - Trend Explorer | Built by Rohit Tiwaskar",
@@ -141,34 +142,34 @@ html, body, .stApp {
   font-weight: 600;
 }
 
-/* Pure Search Text Input */
-div[data-testid="stTextInput"] input {
-  border-radius: 10px !important;
-  background: #F4F5F7 !important;
-  border: 1px solid transparent !important;
-  min-height: 2.35rem !important;
-  font-size: 0.85rem !important;
-  color: #44475B !important;
-  transition: all 0.15s ease;
-}
-div[data-testid="stTextInput"] input:focus {
-  background: #fff !important;
-  border-color: #5367FF !important;
-  box-shadow: 0 0 0 2px rgba(83, 103, 255, 0.12) !important;
-}
-
-/* Select Dropdowns */
+/* Google-Style Clean Search Bar (Hides added trend pills inside the search input) */
 div[data-baseweb="select"] > div {
   border-radius: 10px !important;
   background: #F4F5F7 !important;
   border: 1px solid transparent !important;
   min-height: 2.35rem !important;
+  max-height: 2.35rem !important;
+  overflow: hidden !important;
   transition: all 0.15s ease;
 }
 div[data-baseweb="select"] > div:focus-within {
   background: #fff !important;
   border-color: #5367FF !important;
   box-shadow: 0 0 0 2px rgba(83, 103, 255, 0.12) !important;
+}
+/* Never show added trend pills inside the search bar */
+div[data-testid="stMultiSelect"] span[data-baseweb="tag"] {
+  display: none !important;
+}
+/* Hide the clear-all 'X' icon on the right of multiselect so only typed text is cleared via backspace */
+div[data-testid="stMultiSelect"] [aria-label="Clear all"] {
+  display: none !important;
+}
+div[data-testid="stMultiSelect"] input {
+  width: 100% !important;
+  min-width: 180px !important;
+  color: #44475B !important;
+  font-size: 0.85rem !important;
 }
 ul[data-baseweb="menu"] {
   border-radius: 10px !important;
@@ -236,6 +237,71 @@ ul[data-baseweb="menu"] {
   border-radius:5px; padding:0px 5px; white-space:nowrap; }
 .gw-tri { width:0; height:0; border-left:4px solid transparent; border-right:4px solid transparent; border-top:5px solid #5367FF; margin-top:1px; }
 </style>
+"""
+
+# JS helper to keep the typed search query in the single search bar & keep dropdown open
+# across selections until the user manually backspaces everything out of the search box.
+PERSISTENT_SEARCH_JS = """
+<script>
+(function() {
+  const doc = window.parent.document;
+  const win = window.parent;
+  const STORE_KEY = "pw_active_search_text";
+
+  function setNativeValue(el, value) {
+    const valueSetter = Object.getOwnPropertyDescriptor(el, 'value')?.set;
+    const prototype = Object.getPrototypeOf(el);
+    const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+    if (prototypeValueSetter && valueSetter !== prototypeValueSetter) {
+      prototypeValueSetter.call(el, value);
+    } else if (valueSetter) {
+      valueSetter.call(el, value);
+    } else {
+      el.value = value;
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  function attachSearchPersistence() {
+    const msInput = doc.querySelector('div[data-testid="stMultiSelect"] input');
+    if (!msInput) return;
+
+    if (!msInput.dataset.pwBound) {
+      msInput.dataset.pwBound = "1";
+
+      msInput.addEventListener('input', function(e) {
+        win.sessionStorage.setItem(STORE_KEY, e.target.value);
+      });
+
+      msInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Backspace' || e.key === 'Delete') {
+          setTimeout(() => {
+            win.sessionStorage.setItem(STORE_KEY, msInput.value);
+          }, 0);
+        } else if (e.key === 'Escape') {
+          win.sessionStorage.setItem(STORE_KEY, "");
+        }
+      });
+    }
+
+    // Restore typed search text after Streamlit rerun if user hasn't backspaced it
+    const saved = win.sessionStorage.getItem(STORE_KEY) || "";
+    if (saved && msInput.value !== saved) {
+      setTimeout(() => {
+        const inp = doc.querySelector('div[data-testid="stMultiSelect"] input');
+        if (inp && inp.value !== saved) {
+          inp.focus();
+          setNativeValue(inp, saved);
+        }
+      }, 60);
+    }
+  }
+
+  attachSearchPersistence();
+  const observer = new MutationObserver(() => attachSearchPersistence());
+  observer.observe(doc.body, { childList: true, subtree: true });
+})();
+</script>
 """
 
 
@@ -419,16 +485,7 @@ def toggle_drawer() -> None:
     st.session_state["drawer_open"] = not st.session_state.get("drawer_open", False)
 
 
-def _add_tag(tag: str) -> None:
-    """Adds a trend to active selection while keeping search query intact."""
-    cur = list(st.session_state.get("selected_tags", []))
-    if tag not in cur:
-        cur.append(tag)
-        st.session_state["selected_tags"] = cur
-
-
 def _remove_tag(tag: str) -> None:
-    """Removes a trend from active selection (always keeps at least 1 trend)."""
     cur = [t for t in st.session_state.get("selected_tags", []) if t != tag]
     if cur:
         st.session_state["selected_tags"] = cur
@@ -847,7 +904,7 @@ def main() -> None:
 
     tags = list(df.columns) if not df.empty else []
 
-    # Sanitize active plotted tag list in session_state
+    # Sanitize multi-select tag list in session_state BEFORE creating the widget
     if "selected_tags" in st.session_state:
         valid_sel = [t for t in st.session_state["selected_tags"] if t in tags]
         if valid_sel:
@@ -859,10 +916,8 @@ def main() -> None:
     elif tags:
         st.session_state["selected_tags"] = [tags[0]]
 
-    # ---- Top Bar: Brand | Pure Search Box | Filtered Dropdown | Upload | Parameters ---- #
-    c_brand, c_search, c_results, c_up, c_menu = st.columns(
-        [1.2, 2.35, 1.85, 0.95, 1.05], vertical_alignment="center"
-    )
+    # ---- Top Bar: Brand | Single Google-Style Search Bar | Upload | Parameters -- #
+    c_brand, c_search_drop, c_up, c_menu = st.columns([1.25, 4.15, 0.95, 1.05], vertical_alignment="center")
     c_brand.markdown(
         f'<div class="gw-brand-wrap">'
         f'<div class="gw-brand"><span class="dot"></span>PlantWatch</div>'
@@ -871,57 +926,19 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    # 1. Pure Search Input: never shows selected chips, and keeps typed text until backspaced
-    search_query = c_search.text_input(
+    selected_tags = c_search_drop.multiselect(
         "Search trends",
-        key="tag_search_query",
-        placeholder="🔍 Search trend (e.g., Temp, Flow, PT-305)...",
+        options=tags,
+        key="selected_tags",
+        placeholder="🔍 Search trends (e.g., Temp, Flow, PT-305)...",
         label_visibility="collapsed",
     )
-
-    q_clean = search_query.strip().lower()
-    matching_tags = [t for t in tags if q_clean in t.lower()] if q_clean else tags
-
-    # 2. Persistent Dropdown showing filtered matches (remains filtered after clicking + Add)
-    drop_label = (
-        f"📋 Matches ({len(matching_tags)})"
-        if q_clean
-        else f"📋 All Trends ({len(tags)})"
-    )
-    with c_results.popover(drop_label, **BTN_KW):
-        if not matching_tags:
-            st.caption(f"No trends match **'{esc(search_query)}'**.")
-        else:
-            st.caption(
-                f"Showing **{len(matching_tags)}** match(es)"
-                + (f" for `{esc(search_query)}`" if q_clean else "")
-                + " — stays filtered until search bar is cleared."
-            )
-            for t in matching_tags:
-                is_added = t in st.session_state["selected_tags"]
-                r_name, r_btn = st.columns([3.1, 1.2], vertical_alignment="center")
-                r_name.markdown(f"**{esc(t)}**" if is_added else esc(t))
-                if is_added:
-                    r_btn.button(
-                        "✓ Added",
-                        key=f"added_chk_{t}",
-                        disabled=True,
-                        **BTN_KW,
-                    )
-                else:
-                    r_btn.button(
-                        "+ Add",
-                        key=f"add_tag_{t}",
-                        on_click=_add_tag,
-                        args=(t,),
-                        type="primary",
-                        **BTN_KW,
-                    )
-
-    selected_tags = st.session_state["selected_tags"]
     if not selected_tags and tags:
         selected_tags = [tags[0]]
         st.session_state["selected_tags"] = selected_tags
+
+    # Inject 0-height JS enhancer so typed text stays in the search box & dropdown stays filtered
+    components.html(PERSISTENT_SEARCH_JS, height=0, width=0)
 
     with c_up.popover("📂 Upload", **BTN_KW):
         up_top = st.file_uploader(
@@ -1062,7 +1079,7 @@ def main() -> None:
             )
             separate_axes = not st.session_state.get("merge_y_axes_quick", False)
 
-            # Compact removable pills for plotted trends
+            # Compact removable pills below the legend strip (since search bar stays clean)
             rem_cols = st.columns(min(len(selected_tags), 8))
             for idx, t in enumerate(selected_tags):
                 rem_cols[idx % 8].button(
