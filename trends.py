@@ -186,7 +186,7 @@ ul[data-baseweb="menu"] {
 /* Active Trends Legend Strip */
 .gw-legend-strip {
   display:flex; flex-wrap:wrap; align-items:center; gap:.55rem;
-  margin: .3rem 0 .1rem 0; min-height: 1.95rem;
+  margin: .2rem 0 .1rem 0; min-height: 1.95rem;
 }
 .gw-leg-item {
   display:inline-flex; align-items:center; gap:.45rem;
@@ -315,7 +315,6 @@ def read_table(file_bytes: bytes, filename: str, sheet: str | None) -> pd.DataFr
     if filename.lower().endswith((".xlsx", ".xlsm")):
         df = pd.read_excel(bio, sheet_name=sheet if sheet is not None else 0)
     else:
-        # Fast C-engine first (critical for large 50MB+ CSVs), fallback to python sniffer
         try:
             df = pd.read_csv(bio, low_memory=False)
         except Exception:
@@ -409,6 +408,17 @@ def downsample(s: pd.Series, max_pts: int = 15000) -> pd.Series:
 
 def toggle_drawer() -> None:
     st.session_state["drawer_open"] = not st.session_state.get("drawer_open", False)
+
+
+# Synchronized Y-axis state callbacks (On-Chart Merge Toggle <-> Drawer Separate Toggle)
+def _on_merge_toggle() -> None:
+    merged = st.session_state.get("merge_y_axes_quick", False)
+    st.session_state["separate_axes"] = not merged
+
+
+def _on_separate_toggle() -> None:
+    sep = st.session_state.get("separate_axes", True)
+    st.session_state["merge_y_axes_quick"] = not sep
 
 
 # --------------------------------------------------------------------------- #
@@ -626,18 +636,19 @@ def build_multi_figure(
                     tickfont=dict(color=color, size=10.5),
                 )
 
-        first_color = PALETTE[0] if separate_axes else "#9A9CA8"
+        first_color = PALETTE[0] if separate_axes else SLATE
         y_axis_cfg = dict(
             side="left",
             showgrid=True,
             gridcolor=FAINT,
             gridwidth=1,
             zeroline=False,
-            showline=True if separate_axes else False,
-            linecolor=rgba(first_color, 0.55),
-            linewidth=1.5,
+            showline=True,
+            linecolor=rgba(first_color, 0.55) if separate_axes else "#DCDEE4",
+            linewidth=1.5 if separate_axes else 1.2,
             fixedrange=False,
             tickfont=dict(color=first_color, size=11),
+            title=dict(text="Shared Y-Axis", font=dict(size=11, color=GREY)) if not separate_axes else None,
         )
         if separate_axes:
             s0 = df[selected_tags[0]].dropna()
@@ -769,7 +780,6 @@ def _handle_upload(up_file) -> None:
         st.session_state["active_sheet"] = sheets[0]
     else:
         st.session_state["active_sheet"] = None
-    # Safely clear widget state BEFORE next rerun instantiates the multiselect
     st.session_state.pop("selected_tags", None)
     st.session_state.pop("inspect_tag", None)
     st.rerun()
@@ -783,6 +793,10 @@ def main() -> None:
 
     if "drawer_open" not in st.session_state:
         st.session_state["drawer_open"] = False
+    if "separate_axes" not in st.session_state:
+        st.session_state["separate_axes"] = True
+    if "merge_y_axes_quick" not in st.session_state:
+        st.session_state["merge_y_axes_quick"] = not st.session_state["separate_axes"]
 
     # Load data from session state if uploaded, else sample
     up_bytes = st.session_state.get("uploaded_bytes")
@@ -909,9 +923,13 @@ def main() -> None:
                 if len(selected_tags) > 1 else selected_tags[0]
             )
 
-            # Row 2: Axis & Mean toggles
+            # Row 2: Axis & Mean toggles (Synced with quick Merge Y-axes handle)
             t_ax, t_mn = st.columns(2)
-            separate_axes = t_ax.toggle("Separate Y-axes", value=separate_axes, key="separate_axes")
+            separate_axes = t_ax.toggle(
+                "Separate Y-axes",
+                key="separate_axes",
+                on_change=_on_separate_toggle,
+            )
             show_mean = t_mn.toggle("Show mean lines", value=show_mean, key="show_mean")
 
             idx_color = PALETTE[selected_tags.index(inspect_tag) % len(PALETTE)]
@@ -955,15 +973,29 @@ def main() -> None:
                     f'<span class="gw-leg-stat">Latest <b>{last_v}</b> · Mean <b>{avg_v}</b></span>'
                     f'</div>'
                 )
+        axis_mode_label = "Shared Y-Axis" if (len(selected_tags) > 1 and not separate_axes) else "Multi Y-Axes"
         window_info = (
-            f"{chart_type} · {fmt_ts(df.index[0])} → {fmt_ts(df.index[-1])} &nbsp;|&nbsp; "
-            f"Created by <b style='color:#44475B;'>{esc(AUTHOR_NAME)}</b>"
+            f"{chart_type} · {axis_mode_label if len(selected_tags) > 1 else 'Single Y-Axis'} · "
+            f"{fmt_ts(df.index[0])} → {fmt_ts(df.index[-1])}"
         )
-        st.markdown(
+        legend_html = (
             f'<div class="gw-legend-strip">{"".join(badges)}'
-            f'<span class="gw-window-badge">{window_info}</span></div>',
-            unsafe_allow_html=True,
+            f'<span class="gw-window-badge">{window_info}</span></div>'
         )
+
+        # Quick On-Canvas Handle to Merge Y-Axes whenever 2+ trends are plotted
+        if len(selected_tags) > 1:
+            leg_col, merge_col = st.columns([5.6, 1.15], vertical_alignment="center")
+            leg_col.markdown(legend_html, unsafe_allow_html=True)
+            merge_col.toggle(
+                "Merge Y-axes",
+                key="merge_y_axes_quick",
+                on_change=_on_merge_toggle,
+                help="Combine all selected trends onto one shared Y-axis scale (useful for comparing tags with identical units, e.g. multiple temperatures or pressures).",
+            )
+            separate_axes = not st.session_state.get("merge_y_axes_quick", False)
+        else:
+            st.markdown(legend_html, unsafe_allow_html=True)
 
         fig = build_multi_figure(
             df,
