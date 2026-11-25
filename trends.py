@@ -141,7 +141,23 @@ html, body, .stApp {
   font-weight: 600;
 }
 
-/* Unified Live-Search Multiselect Dropdown */
+/* Pure Search Text Input */
+div[data-testid="stTextInput"] input {
+  border-radius: 10px !important;
+  background: #F4F5F7 !important;
+  border: 1px solid transparent !important;
+  min-height: 2.35rem !important;
+  font-size: 0.85rem !important;
+  color: #44475B !important;
+  transition: all 0.15s ease;
+}
+div[data-testid="stTextInput"] input:focus {
+  background: #fff !important;
+  border-color: #5367FF !important;
+  box-shadow: 0 0 0 2px rgba(83, 103, 255, 0.12) !important;
+}
+
+/* Select Dropdowns */
 div[data-baseweb="select"] > div {
   border-radius: 10px !important;
   background: #F4F5F7 !important;
@@ -153,13 +169,6 @@ div[data-baseweb="select"] > div:focus-within {
   background: #fff !important;
   border-color: #5367FF !important;
   box-shadow: 0 0 0 2px rgba(83, 103, 255, 0.12) !important;
-}
-span[data-baseweb="tag"] {
-  background-color: #EEF0FF !important;
-  color: #44475B !important;
-  border-radius: 6px !important;
-  font-weight: 600 !important;
-  font-size: 0.8rem !important;
 }
 ul[data-baseweb="menu"] {
   border-radius: 10px !important;
@@ -410,7 +419,21 @@ def toggle_drawer() -> None:
     st.session_state["drawer_open"] = not st.session_state.get("drawer_open", False)
 
 
-# Synchronized Y-axis state callbacks (On-Chart Merge Toggle <-> Drawer Separate Toggle)
+def _add_tag(tag: str) -> None:
+    """Adds a trend to active selection while keeping search query intact."""
+    cur = list(st.session_state.get("selected_tags", []))
+    if tag not in cur:
+        cur.append(tag)
+        st.session_state["selected_tags"] = cur
+
+
+def _remove_tag(tag: str) -> None:
+    """Removes a trend from active selection (always keeps at least 1 trend)."""
+    cur = [t for t in st.session_state.get("selected_tags", []) if t != tag]
+    if cur:
+        st.session_state["selected_tags"] = cur
+
+
 def _on_merge_toggle() -> None:
     merged = st.session_state.get("merge_y_axes_quick", False)
     st.session_state["separate_axes"] = not merged
@@ -824,7 +847,7 @@ def main() -> None:
 
     tags = list(df.columns) if not df.empty else []
 
-    # Sanitize multi-select tag list in session_state BEFORE creating the widget
+    # Sanitize active plotted tag list in session_state
     if "selected_tags" in st.session_state:
         valid_sel = [t for t in st.session_state["selected_tags"] if t in tags]
         if valid_sel:
@@ -836,8 +859,10 @@ def main() -> None:
     elif tags:
         st.session_state["selected_tags"] = [tags[0]]
 
-    # ---- Top Bar: Brand + Author | Live Multi-Select | Upload | Parameters -- #
-    c_brand, c_search_drop, c_up, c_menu = st.columns([1.25, 4.15, 0.95, 1.05], vertical_alignment="center")
+    # ---- Top Bar: Brand | Pure Search Box | Filtered Dropdown | Upload | Parameters ---- #
+    c_brand, c_search, c_results, c_up, c_menu = st.columns(
+        [1.2, 2.35, 1.85, 0.95, 1.05], vertical_alignment="center"
+    )
     c_brand.markdown(
         f'<div class="gw-brand-wrap">'
         f'<div class="gw-brand"><span class="dot"></span>PlantWatch</div>'
@@ -846,15 +871,57 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    selected_tags = c_search_drop.multiselect(
-        "Search and select tags",
-        options=tags,
-        key="selected_tags",
-        placeholder="🔍 Type to search & select multiple tags (e.g., TI-203, Pressure, Flow)...",
+    # 1. Pure Search Input: never shows selected chips, and keeps typed text until backspaced
+    search_query = c_search.text_input(
+        "Search trends",
+        key="tag_search_query",
+        placeholder="🔍 Search trend (e.g., Temp, Flow, PT-305)...",
         label_visibility="collapsed",
     )
+
+    q_clean = search_query.strip().lower()
+    matching_tags = [t for t in tags if q_clean in t.lower()] if q_clean else tags
+
+    # 2. Persistent Dropdown showing filtered matches (remains filtered after clicking + Add)
+    drop_label = (
+        f"📋 Matches ({len(matching_tags)})"
+        if q_clean
+        else f"📋 All Trends ({len(tags)})"
+    )
+    with c_results.popover(drop_label, **BTN_KW):
+        if not matching_tags:
+            st.caption(f"No trends match **'{esc(search_query)}'**.")
+        else:
+            st.caption(
+                f"Showing **{len(matching_tags)}** match(es)"
+                + (f" for `{esc(search_query)}`" if q_clean else "")
+                + " — stays filtered until search bar is cleared."
+            )
+            for t in matching_tags:
+                is_added = t in st.session_state["selected_tags"]
+                r_name, r_btn = st.columns([3.1, 1.2], vertical_alignment="center")
+                r_name.markdown(f"**{esc(t)}**" if is_added else esc(t))
+                if is_added:
+                    r_btn.button(
+                        "✓ Added",
+                        key=f"added_chk_{t}",
+                        disabled=True,
+                        **BTN_KW,
+                    )
+                else:
+                    r_btn.button(
+                        "+ Add",
+                        key=f"add_tag_{t}",
+                        on_click=_add_tag,
+                        args=(t,),
+                        type="primary",
+                        **BTN_KW,
+                    )
+
+    selected_tags = st.session_state["selected_tags"]
     if not selected_tags and tags:
         selected_tags = [tags[0]]
+        st.session_state["selected_tags"] = selected_tags
 
     with c_up.popover("📂 Upload", **BTN_KW):
         up_top = st.file_uploader(
@@ -991,19 +1058,32 @@ def main() -> None:
                 "Merge Y-axes",
                 key="merge_y_axes_quick",
                 on_change=_on_merge_toggle,
-                help="Combine all selected trends onto one shared Y-axis scale (useful for comparing tags with identical units, e.g. multiple temperatures or pressures).",
+                help="Combine all selected trends onto one shared Y-axis scale.",
             )
             separate_axes = not st.session_state.get("merge_y_axes_quick", False)
+
+            # Compact removable pills for plotted trends
+            rem_cols = st.columns(min(len(selected_tags), 8))
+            for idx, t in enumerate(selected_tags):
+                rem_cols[idx % 8].button(
+                    f"✕ {t}",
+                    key=f"rem_chip_{t}",
+                    on_click=_remove_tag,
+                    args=(t,),
+                    help=f"Remove {t} from chart",
+                    **BTN_KW,
+                )
         else:
             st.markdown(legend_html, unsafe_allow_html=True)
 
+        chart_h = 475 if len(selected_tags) > 1 else 515
         fig = build_multi_figure(
             df,
             selected_tags,
             show_mean=show_mean,
             separate_axes=separate_axes,
             chart_type=chart_type,
-            chart_height=515,
+            chart_height=chart_h,
         )
         st.plotly_chart(
             fig,
